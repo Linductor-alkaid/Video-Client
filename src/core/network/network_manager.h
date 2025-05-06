@@ -13,6 +13,7 @@ date: 2025-05-05
 #include <atomic>
 #include <mutex>
 #include <thread>
+#include <chrono>
 
 class NetworkManager {
 public:
@@ -30,7 +31,8 @@ public:
     std::vector<Json::Value> getDiscoveredServers() const;
 
     // 连接管理接口
-    bool connectToServer(const std::string& ip, int port);
+    void connectToServer(const std::string& ip, int port);
+    void cancelConnect();
     void disconnect();
     void selectCamera(int index);
 
@@ -45,12 +47,17 @@ public:
     int getReceiverStatus() const { 
         return receiver_status_.load(); 
     }
-    void refreshServerList() { 
+    void refreshServerList() {
+        {
+            std::lock_guard<std::mutex> lock(servers_mutex_);
+            servers_.clear();  // 清空旧服务器列表
+        } 
         startDiscovery(); 
     }
     bool isDiscovering() const { 
         return discovery_running_.load(); 
     }
+    CameraListCallback getCameraListCallback() const { return camera_select_callback_; }
 
 private:
     void handleHeartbeat();
@@ -64,6 +71,7 @@ private:
     std::atomic<int> receiver_status_{200};  // 200=正常，300=拥塞
     std::atomic<bool> camera_selected_{false}; 
     std::chrono::steady_clock::time_point last_heartbeat_;
+    static constexpr std::chrono::seconds DISCOVERY_DURATION{5};
 
     // 网络资源
     int heartbeat_socket_ = -1;
@@ -73,6 +81,8 @@ private:
     std::thread discovery_thread_;
     std::thread heartbeat_thread_;
     std::thread video_thread_;
+    std::atomic<bool> is_connecting_{false};
+    std::atomic<bool> cancel_connect_{false};
 
     // 回调函数
     FrameCallback frame_callback_;

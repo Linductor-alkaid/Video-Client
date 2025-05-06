@@ -35,10 +35,12 @@ NetworkManager::~NetworkManager() {
 
 // 服务发现模块
 void NetworkManager::startDiscovery() {
+    stopDiscovery();
     if (discovery_running_) return;
 
     discovery_running_.store(true);
     discovery_thread_ = std::thread([this]() {
+        auto start_time = std::chrono::steady_clock::now();
         int sock = socket(AF_INET, SOCK_DGRAM, 0);
         if (sock < 0) return;
 
@@ -52,7 +54,8 @@ void NetworkManager::startDiscovery() {
         setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
         char buffer[1024];
-        while (discovery_running_) {
+        while (discovery_running_ && 
+            std::chrono::steady_clock::now() - start_time < DISCOVERY_DURATION) {
             sockaddr_in from{};
             socklen_t from_len = sizeof(from);
             int n = recvfrom(sock, buffer, sizeof(buffer), 0,
@@ -77,6 +80,8 @@ void NetworkManager::startDiscovery() {
                 }
             }
         }
+
+        discovery_running_.store(false); // 超时后停止
         close(sock);
     });
 }
@@ -86,126 +91,140 @@ void NetworkManager::stopDiscovery() {
     if (discovery_thread_.joinable()) {
         discovery_thread_.join();
     }
+    discovery_thread_ = std::thread(); // 重置线程对象
 }
 
 // 连接管理模块
-bool NetworkManager::connectToServer(const std::string& ip, int port) {
-    if (is_connected_) disconnect();
-
-    // 创建TCP socket
-    heartbeat_socket_ = socket(AF_INET, SOCK_STREAM, 0);
-    if (heartbeat_socket_ < 0) {
+void NetworkManager::connectToServer(const std::string& ip, int port) {
+    if (is_connected_.load() || is_connecting_.exchange(true)) {
         if (connection_status_callback_) {
-            connection_status_callback_(false, "创建socket失败");
+            connection_status_callback_(false, "Already connecting/connected");
         }
-        return false;
+        return;
     }
+    cancel_connect_.store(false);
 
-    // 设置超时参数
-    struct timeval tv;
-    tv.tv_sec = 3;  // 3秒连接超时
-    tv.tv_usec = 0;
-    setsockopt(heartbeat_socket_, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    std::thread([this, ip, port]() {
+        bool success = false;
+        std::string message;
+        int sock = -1; // 提前声明所有变量
+        sockaddr_in addr {};
+        struct timeval tv;
+        char buffer[1024] = {0};
+        int n = 0;
+        Json::Value cam_list;
+        std::vector<int> cameras;
+        const std::string handshake = "CLIENT_HANDSHAKE";
 
-    // 连接服务器
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    inet_pton(AF_INET, ip.c_str(), &addr.sin_addr);
+        sock = socket(AF_INET, SOCK_STREAM, 0);
 
-    if (connect(heartbeat_socket_, (sockaddr*)&addr, sizeof(addr)) != 0) {
-        close(heartbeat_socket_);
-        heartbeat_socket_ = -1;
-        
-        if (connection_status_callback_) {
-            connection_status_callback_(false, "连接服务器超时");
+        if (sock < 0) {
+            message = "Create socket failed";
+            goto cleanup;
         }
-        return false;
-    }
 
-    // 发送握手标识
-    const std::string handshake = "CLIENT_HANDSHAKE";
-    if (send(heartbeat_socket_, handshake.c_str(), handshake.size(), 0) <= 0) {
-        close(heartbeat_socket_);
-        heartbeat_socket_ = -1;
-        
-        if (connection_status_callback_) {
-            connection_status_callback_(false, "握手信号发送失败");
+        // 设置连接超时
+        // struct timeval tv;
+        tv.tv_sec = 3;
+        tv.tv_usec = 0;
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+        // sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port);
+        inet_pton(AF_INET, ip.c_str(), &addr.sin_addr);
+
+        // 非阻塞连接
+        if (connect(sock, (sockaddr*)&addr, sizeof(addr)) != 0) {
+            if (errno == EINPROGRESS) {
+                fd_set set;
+                FD_ZERO(&set);
+                FD_SET(sock, &set);
+                timeval timeout{tv.tv_sec, tv.tv_usec};
+
+                if (select(sock + 1, nullptr, &set, nullptr, &timeout) <= 0) {
+                    message = "Connection timeout";
+                    goto cleanup;
+                }
+
+                int so_error;
+                socklen_t len = sizeof(so_error);
+                getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &len);
+                if (so_error != 0) {
+                    message = "Connection failed: " + std::string(strerror(so_error));
+                    goto cleanup;
+                }
+            } else {
+                message = "Connect error: " + std::string(strerror(errno));
+                goto cleanup;
+            }
         }
-        return false;
-    }
 
-    // 设置接收超时
-    tv.tv_sec = 5;  // 5秒接收超时
-    setsockopt(heartbeat_socket_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-    // 接收摄像头列表
-    char buffer[1024];
-    int n = recv(heartbeat_socket_, buffer, sizeof(buffer), 0);
-    if (n <= 0) {
-        close(heartbeat_socket_);
-        heartbeat_socket_ = -1;
-        
-        std::string err = (n == 0) ? "连接被服务器关闭" : "接收摄像头列表超时";
-        if (connection_status_callback_) {
-            connection_status_callback_(false, err);
+        // 发送握手
+        // const std::string handshake = "CLIENT_HANDSHAKE";
+        if (send(sock, handshake.c_str(), handshake.size(), 0) <= 0) {
+            message = "Handshake failed";
+            goto cleanup;
         }
-        return false;
-    }
 
-    // 解析摄像头列表
-    Json::Value cam_list;
-    if (!Json::Reader().parse(buffer, buffer + n, cam_list) || 
-        !cam_list.isMember("cameras")) {
-        close(heartbeat_socket_);
-        heartbeat_socket_ = -1;
-        
-        if (connection_status_callback_) {
-            connection_status_callback_(false, "无效的服务器响应");
+        // 接收摄像头列表（非阻塞）
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        // char buffer[1024];
+        n = recv(sock, buffer, sizeof(buffer), 0);
+        if (n <= 0) {
+            message = (n == 0) ? "Server closed" : "Receive timeout";
+            goto cleanup;
         }
-        return false;
-    }
 
-    // 转换摄像头列表格式
-    std::vector<int> cameras;
-    try {
+        // Json::Value cam_list;
+        if (!Json::Reader().parse(buffer, buffer + n, cam_list) || !cam_list.isMember("cameras")) {
+            message = "Invalid server response";
+            goto cleanup;
+        }
+
+        // std::vector<int> cameras;
         for (const auto& cam : cam_list["cameras"]) {
             cameras.push_back(cam.asInt());
         }
-    } catch (...) {
-        close(heartbeat_socket_);
-        heartbeat_socket_ = -1;
-        
-        if (connection_status_callback_) {
-            connection_status_callback_(false, "摄像头数据解析失败");
+
+        // 连接成功
+        {
+            std::lock_guard<std::mutex> lock(servers_mutex_);
+            current_server_ip_ = ip;
+            heartbeat_socket_ = sock;
+            is_connected_.store(true);
+            success = true;
         }
-        return false;
+
+        // 触发摄像头选择回调
+        if (camera_select_callback_) {
+            camera_select_callback_(cameras);
+        }
+
+        // 启动心跳和视频线程
+        heartbeat_thread_ = std::thread(&NetworkManager::handleHeartbeat, this);
+        startVideoReception();
+
+        message = "Connected to " + ip;
+
+    cleanup:
+        if (!success) {
+            if (sock != -1) close(sock);
+            if (cancel_connect_.load()) {
+                message = "Connection canceled";
+            }
+        }
+        if (connection_status_callback_) {
+            connection_status_callback_(success, message);
+        }
+        is_connecting_.store(false);
+    }).detach();
+}
+
+void NetworkManager::cancelConnect() {
+    if (is_connecting_.load()) {
+        cancel_connect_.store(true);
     }
-
-    // 更新连接状态
-    current_server_ip_ = ip;
-    is_connected_.store(true);
-
-    // 触发UI回调
-    if (connection_status_callback_) {
-        connection_status_callback_(true, "成功连接到 " + ip);
-    }
-    
-    // 触发摄像头选择（主线程执行）
-    if (camera_select_callback_) {
-        auto& callback = camera_select_callback_;
-        std::thread([callback, cameras]() {
-            callback(cameras);
-        }).detach();
-    }
-
-    // 启动心跳线程
-    heartbeat_thread_ = std::thread(&NetworkManager::handleHeartbeat, this);
-    
-    // 启动视频接收
-    startVideoReception();
-
-    return true;
 }
 
 // 修改selectCamera方法

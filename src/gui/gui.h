@@ -56,7 +56,10 @@ private:
 
     // 状态
     std::string current_server;
+    std::vector<int> camera_ids_; // 存储当前摄像头选项的ID列表
     bool is_connected = false;
+    bool is_connecting = false;
+    bool is_modal_open_ = false;
 };
 
 extern ServerListCache server_cache;

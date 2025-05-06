@@ -52,8 +52,11 @@ bool VideoClientUI::init() {
     net_manager_.setStatusCallback([this](bool conn, const std::string& msg){
         this->onConnectionStatus(conn, msg);
         if (conn) {
-            // 自动选择默认摄像头
-            net_manager_.selectCamera(0);
+            net_manager_.setCameraListCallback([this](const auto& cameras){
+                if (!cameras.empty()) {
+                    showCameraSelection(cameras); // 需要确保cameras有效
+                }
+            });
         }
     });
     
@@ -62,7 +65,11 @@ bool VideoClientUI::init() {
         if (!cams.empty()) {
             // 更新状态显示
             status_text.setString("选择默认摄像头中...");
-            net_manager_.selectCamera(0);
+            if (cams.size() > 0) {
+                net_manager_.selectCamera(0);
+            }
+        }else {
+            status_text.setString("错误：无可用摄像头");
         }
     });
     
@@ -108,6 +115,20 @@ void VideoClientUI::initStatusBar() {
 void VideoClientUI::handleEvents() {
     sf::Event event;
     while (window.pollEvent(event)) {
+        if (is_modal_open_) {
+            // 拦截所有非模态处理的事件
+            if (event.type == sf::Event::MouseButtonPressed) {
+                for (size_t i = 0; i < camera_options_.size(); ++i) {
+                    if (camera_options_[i].getGlobalBounds().contains(event.mouseButton.x, event.mouseButton.y)) {
+                        int cam_id = camera_ids_[i];
+                        onCameraSelected(cam_id);
+                        is_modal_open_ = false;
+                        return;
+                    }
+                }
+            }
+            continue; // 模态打开时跳过其他处理
+        }
         if (event.type == sf::Event::Closed) {
             window.close();
         }
@@ -122,7 +143,8 @@ void VideoClientUI::handleEvents() {
                     event.mouseButton.x, 
                     event.mouseButton.y)
                 ) {
-                    onCameraSelected(i);
+                    int cam_id = camera_ids_[i];
+                    onCameraSelected(cam_id);
                     camera_options_.clear();
                     break;
                 }
@@ -152,7 +174,9 @@ void VideoClientUI::updateVideoFrame() {
 void VideoClientUI::updateStatusText() {
     std::string status;
     
-    if (net_manager_.isDiscovering()) {
+    if (is_connecting) {
+        status = "正在连接...";
+    } else if (net_manager_.isDiscovering()) {
         status = "正在搜索服务器...";
     } else if (!is_connected) {
         status = "未连接 | 发现" + 
@@ -167,6 +191,7 @@ void VideoClientUI::updateStatusText() {
 }
 
 void VideoClientUI::onConnectionStatus(bool connected, const std::string& msg) {
+    is_connecting = false;
     static auto last_connected_time_ = std::chrono::system_clock::now();
     
     std::lock_guard<std::mutex> lock(status_mutex_); // 添加互斥锁
@@ -189,7 +214,7 @@ void VideoClientUI::onConnectionStatus(bool connected, const std::string& msg) {
         }
     }
     
-    // 强制重绘状态栏
+    // 重绘状态栏
     needs_redraw_ = true;
 }
 
@@ -201,34 +226,34 @@ void VideoClientUI::pushVideoFrame(sf::Texture frame) {
     }
 }
 
-// 刷新按钮点击处理
+// 按钮点击处理
 void VideoClientUI::onRefreshClicked() {
     server_cache.update({});
+    server_list_widget_.updateList({});
     status_text.setString(sf::String::fromUtf8(std::begin("正在搜索服务器..."), std::end("正在搜索服务器...")));
     net_manager_.refreshServerList();
 }
 
 void VideoClientUI::onServerSelected(const Json::Value& server) {
     current_server = server["ip"].asString();
+    is_connecting = true;
     status_text.setString(sf::String::fromUtf8(std::begin("正在连接..."), std::end("正在连接...")));
     
-    bool connResult = net_manager_.connectToServer(
-        server["ip"].asString(),
-        server["port"].asInt()
-    );
+    // 获取并保存原始回调
+    auto original_cam_callback = net_manager_.getCameraListCallback();
     
-    if (!connResult) {
-        onConnectionStatus(false, "连接失败");
-        return;
-    }
-    
-    // 设置摄像头选择回调
-    net_manager_.setCameraListCallback([this](const auto& cameras){
-        if (!cameras.empty()) {
-            // 显示摄像头选择界面
-            showCameraSelection(cameras);
+    // 设置新的状态回调（注意捕获original_cam_callback）
+    net_manager_.setStatusCallback([this, original_cam_callback](bool conn, const std::string& msg) {
+        is_connecting = false;
+        if (conn) {
+            // 恢复原始回调
+            net_manager_.setCameraListCallback(original_cam_callback);
         }
+        onConnectionStatus(conn, msg);
     });
+
+    // 发起连接
+    net_manager_.connectToServer(server["ip"].asString(), server["heartbeat_port"].asInt());
 }
 
 // 渲染主循环
@@ -238,6 +263,11 @@ void VideoClientUI::update() {
         window.clear(sf::Color(25, 25, 35));
         
         server_list_widget_.draw(window);
+
+        if (is_modal_open_) {
+            window.draw(camera_modal_);
+            for (auto& opt : camera_options_) window.draw(opt);
+        }
         
         // 绘制视频区域
         window.draw(video_border);
@@ -263,6 +293,11 @@ void VideoClientUI::updateServerListUI(const std::vector<Json::Value>& servers) 
 }
 
 void VideoClientUI::showCameraSelection(const std::vector<int>& cameras) {
+    if (cameras.empty()) return;
+    camera_ids_ = cameras;
+
+    is_modal_open_ = true; // 进入模态状态
+    camera_options_.clear();
     // 创建模态选择框
     camera_modal_.setSize({400, 300});
     camera_modal_.setFillColor(sf::Color(50, 50, 70));
@@ -277,6 +312,7 @@ void VideoClientUI::showCameraSelection(const std::vector<int>& cameras) {
         sf::Text option;
         option.setFont(font);
         option.setString(sf::String::fromUtf8(std::begin("摄像头 " + std::to_string(cameras[i])), std::end("摄像头 " + std::to_string(cameras[i]))));
+        // option.setUserData(reinterpret_cast<void*>(cameras[i]));
         option.setPosition(
             camera_modal_.getPosition().x + 50,
             camera_modal_.getPosition().y + 50 + i*50
@@ -286,6 +322,13 @@ void VideoClientUI::showCameraSelection(const std::vector<int>& cameras) {
 }
 
 void VideoClientUI::onCameraSelected(int index) {
-    net_manager_.selectCamera(index);
-    status_text.setString(sf::String::fromUtf8(std::begin("已选择摄像头 " + std::to_string(index)), std::end("已选择摄像头 " + std::to_string(index))));
+    try {
+        if (index >= 0 && index < camera_ids_.size()) {
+            net_manager_.selectCamera(index);
+            status_text.setString(sf::String::fromUtf8(std::begin("已选择摄像头 " + std::to_string(index)), std::end("已选择摄像头 " + std::to_string(index))));
+        }
+    }catch (const std::exception& e) {
+        std::cerr << "摄像头选择错误: " << e.what() << std::endl;
+        status_text.setString(sf::String::fromUtf8(std::begin("选择摄像头失败"), std::end("选择摄像头失败")));
+    }
 }
