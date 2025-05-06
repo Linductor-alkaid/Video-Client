@@ -15,6 +15,19 @@ date: 2025/05/04
 #include "gui/widgets/server_list.h"
 #include "core/network/network_manager.h"
 
+struct RawVideoFrame {
+    int width;
+    int height;
+    std::vector<uint8_t> pixels;
+
+    // 添加构造函数
+    RawVideoFrame(int w, int h, std::vector<uint8_t> pix)
+        : width(w), height(h), pixels(std::move(pix)) {}
+    
+    // 删除默认构造函数（按需可选）
+    RawVideoFrame() = delete; 
+};
+
 class VideoClientUI {
 public:
     VideoClientUI();
@@ -23,7 +36,7 @@ public:
     void update();
 
     // 视频帧处理接口
-    void pushVideoFrame(sf::Texture frame);
+    void pushVideoFrame(int width, int height, std::vector<uint8_t> pixels);
     
 private:
     void handleEvents();
@@ -49,6 +62,7 @@ private:
     sf::Text status_text;
     sf::RectangleShape camera_modal_;
     std::vector<sf::Text> camera_options_;
+    sf::Texture video_texture;
 
     std::mutex status_mutex_;
     std::chrono::system_clock::time_point last_connected_time_;
@@ -65,7 +79,7 @@ private:
 
 extern ServerListCache server_cache;
 extern std::atomic<bool> ui_running;
-extern std::deque<sf::Texture> video_frames;
+extern std::deque<RawVideoFrame> raw_frames;
 extern std::mutex frame_mutex;
 
 #endif // VIDEO_CLIENT_UI_H

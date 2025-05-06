@@ -17,7 +17,7 @@ date: 2025/05/04
 // 全局资源定义
 ServerListCache server_cache;
 std::atomic<bool> ui_running{false};
-std::deque<sf::Texture> video_frames;
+std::deque<RawVideoFrame> raw_frames;
 std::mutex frame_mutex;
 
 VideoClientUI::VideoClientUI() 
@@ -47,17 +47,33 @@ bool VideoClientUI::init() {
         [this](const auto& servers){ this->updateServerListUI(servers); });
     // net_manager_.setStatusCallback(
     //     [this](bool conn, const std::string& msg){ this->onConnectionStatus(conn, msg); });
-    // 添加网络状态绑定
+    // 网络状态绑定
     net_manager_.setStatusCallback([this](bool conn, const std::string& msg){
         this->onConnectionStatus(conn, msg);
     });
     
-    // 添加摄像头选择回调
+    // 摄像头选择回调
     net_manager_.setCameraListCallback([this](const std::vector<int>& cams){
         if (!cams.empty()) {
             showCameraSelection(cams);
         }else {
             status_text.setString("错误：无可用摄像头");
+        }
+    });
+
+    // 视频帧回调
+    net_manager_.setFrameCallback([this](const VideoFrame& frame) {
+        if (frame.data && frame.width > 0 && frame.height > 0) {
+            // 将像素数据拷贝到缓冲区（需考虑格式对齐）
+            std::vector<uint8_t> pixels(
+                frame.data, 
+                frame.data + frame.size
+            );
+            this->pushVideoFrame(
+                frame.width, 
+                frame.height, 
+                std::move(pixels)
+            );
         }
     });
     
@@ -158,9 +174,22 @@ void VideoClientUI::handleEvents() {
 // 更新视频帧显示（线程安全）
 void VideoClientUI::updateVideoFrame() {
     std::lock_guard<std::mutex> lock(frame_mutex);
-    if (!video_frames.empty()) {
-        video_sprite.setTexture(video_frames.front(), true);
-        video_frames.pop_front();
+    if (!raw_frames.empty()) {
+        const auto& frame = raw_frames.front();
+        
+        // 主线程中创建和更新纹理
+        // 使用成员纹理，仅在尺寸变化时重新创建
+        if (video_texture.getSize().x != frame.width || video_texture.getSize().y != frame.height) {
+            if (!video_texture.create(frame.width, frame.height)) {
+                std::cerr << "纹理创建失败: " << frame.width << "x" << frame.height << std::endl;
+                return;
+            }
+        }
+        
+        video_texture.update(frame.pixels.data(), frame.width, frame.height, 0, 0); // 在主线程操作
+        
+        video_sprite.setTexture(video_texture, true);
+        raw_frames.pop_front();
 
         // 自适应缩放
         auto tex_size = video_sprite.getTexture()->getSize();
@@ -193,7 +222,7 @@ void VideoClientUI::updateStatusText() {
             std::to_string(server_cache.get().size()) + "个服务器";
     } else {
         status = "已连接至 " + current_server + 
-            " | 缓冲帧:" + std::to_string(video_frames.size()) + 
+            " | 缓冲帧:" + std::to_string(raw_frames.size()) + 
             " | 网络状态:" + std::to_string(net_manager_.getReceiverStatus());
     }
     
@@ -236,10 +265,25 @@ void VideoClientUI::onConnectionStatus(bool connected, const std::string& msg) {
 }
 
 // 从网络线程接收视频帧（线程安全）
-void VideoClientUI::pushVideoFrame(sf::Texture frame) {
+void VideoClientUI::pushVideoFrame(int width, int height, std::vector<uint8_t> pixels) {
     std::lock_guard<std::mutex> lock(frame_mutex);
-    if (video_frames.size() < 10) { // 限制缓冲数量
-        video_frames.emplace_back(std::move(frame));
+    if (raw_frames.size() < 10) {
+        // 计算每行需要的字节数（4 字节对齐）
+        const size_t stride = (width * 3 + 3) & ~3; // RGB24 格式下的行对齐
+        const size_t expected_size = stride * height;
+
+        // 如果数据未对齐，进行填充
+        if (pixels.size() != expected_size) {
+            std::vector<uint8_t> aligned_pixels(expected_size, 0);
+            for (size_t row = 0; row < height; ++row) {
+                const uint8_t* src = pixels.data() + row * width * 3;
+                uint8_t* dst = aligned_pixels.data() + row * stride;
+                std::copy(src, src + width * 3, dst);
+            }
+            raw_frames.emplace_back(width, height, std::move(aligned_pixels));
+        } else {
+            raw_frames.emplace_back(width, height, std::move(pixels));
+        }
     }
 }
 
@@ -335,7 +379,7 @@ void VideoClientUI::showCameraSelection(const std::vector<int>& cameras) {
     for (size_t i = 0; i < cameras.size(); ++i) {
         sf::Text option;
         option.setFont(font);
-        option.setString(sf::String::fromUtf8(std::begin("摄像头 " + std::to_string(cameras[i])), std::end("摄像头 " + std::to_string(cameras[i]))));
+        option.setString(sf::String::fromUtf8(std::begin("摄像头"), std::end("摄像头")) + std::to_string(cameras[i]));
         option.setCharacterSize(20);
         option.setFillColor(sf::Color::White);
         option.setPosition(start_x, start_y + i * 40);
