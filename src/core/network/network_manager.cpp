@@ -167,6 +167,8 @@ void NetworkManager::connectToServer(const std::string& ip, int port) {
             goto cleanup;
         }
 
+        heartbeat_thread_ = std::thread(&NetworkManager::handleHeartbeat, this);
+
         // 接收摄像头列表（非阻塞）
         setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
         // char buffer[1024];
@@ -202,7 +204,6 @@ void NetworkManager::connectToServer(const std::string& ip, int port) {
         }
 
         // 启动心跳和视频线程
-        heartbeat_thread_ = std::thread(&NetworkManager::handleHeartbeat, this);
         startVideoReception();
 
         message = "Connected to " + ip;
@@ -270,8 +271,7 @@ void NetworkManager::handleHeartbeat() {
         int bytes_received = recv(heartbeat_socket_, buffer, sizeof(buffer), 0);
         
         
-        if (!camera_selected_ || 
-            std::chrono::steady_clock::now() - last_heartbeat_ > 3s) {
+        if (std::chrono::steady_clock::now() - last_heartbeat_ > 3s) {
             connection_status_callback_(false, "心跳超时");
             break;
         }

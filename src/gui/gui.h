@@ -60,6 +60,7 @@ private:
     bool is_connected = false;
     bool is_connecting = false;
     bool is_modal_open_ = false;
+    bool show_camera_options_ = false;
 };
 
 extern ServerListCache server_cache;

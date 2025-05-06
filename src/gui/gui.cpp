@@ -51,23 +51,12 @@ bool VideoClientUI::init() {
     // 添加网络状态绑定
     net_manager_.setStatusCallback([this](bool conn, const std::string& msg){
         this->onConnectionStatus(conn, msg);
-        if (conn) {
-            net_manager_.setCameraListCallback([this](const auto& cameras){
-                if (!cameras.empty()) {
-                    showCameraSelection(cameras); // 需要确保cameras有效
-                }
-            });
-        }
     });
     
     // 添加摄像头选择回调
     net_manager_.setCameraListCallback([this](const std::vector<int>& cams){
         if (!cams.empty()) {
-            // 更新状态显示
-            status_text.setString("选择默认摄像头中...");
-            if (cams.size() > 0) {
-                net_manager_.selectCamera(0);
-            }
+            showCameraSelection(cams);
         }else {
             status_text.setString("错误：无可用摄像头");
         }
@@ -117,13 +106,13 @@ void VideoClientUI::handleEvents() {
     while (window.pollEvent(event)) {
         if (is_modal_open_) {
             // 拦截所有非模态处理的事件
-            if (event.type == sf::Event::MouseButtonPressed) {
+            if (event.type == sf::Event::MouseButtonPressed && show_camera_options_) {
+                sf::Vector2f mouse_pos(event.mouseButton.x, event.mouseButton.y);
                 for (size_t i = 0; i < camera_options_.size(); ++i) {
-                    if (camera_options_[i].getGlobalBounds().contains(event.mouseButton.x, event.mouseButton.y)) {
-                        int cam_id = camera_ids_[i];
-                        onCameraSelected(cam_id);
-                        is_modal_open_ = false;
-                        return;
+                    if (camera_options_[i].getGlobalBounds().contains(mouse_pos)) {
+                        onCameraSelected(camera_ids_[i]);
+                        show_camera_options_ = false; // 选择后隐藏
+                        break;
                     }
                 }
             }
@@ -270,12 +259,16 @@ void VideoClientUI::update() {
         }
         
         // 绘制视频区域
-        window.draw(video_border);
+        
         updateVideoFrame();
         if (video_sprite.getTexture()) {
             window.draw(video_sprite);
         }
-        
+        if (show_camera_options_) {
+            for (auto& opt : camera_options_) window.draw(opt);
+        }
+        window.draw(video_border);
+
         // 状态栏
         window.draw(status_bar);
         updateStatusText();
@@ -299,12 +292,9 @@ void VideoClientUI::showCameraSelection(const std::vector<int>& cameras) {
     is_modal_open_ = true; // 进入模态状态
     camera_options_.clear();
     // 创建模态选择框
-    camera_modal_.setSize({400, 300});
-    camera_modal_.setFillColor(sf::Color(50, 50, 70));
-    camera_modal_.setPosition(
-        (window.getSize().x - 400) / 2,
-        (window.getSize().y - 300) / 2
-    );
+    // 设置位置到视频区域顶部
+    float start_x = video_border.getPosition().x + 20;
+    float start_y = video_border.getPosition().y + 20;
     
     // 创建选项
     camera_options_.clear();
@@ -312,11 +302,7 @@ void VideoClientUI::showCameraSelection(const std::vector<int>& cameras) {
         sf::Text option;
         option.setFont(font);
         option.setString(sf::String::fromUtf8(std::begin("摄像头 " + std::to_string(cameras[i])), std::end("摄像头 " + std::to_string(cameras[i]))));
-        // option.setUserData(reinterpret_cast<void*>(cameras[i]));
-        option.setPosition(
-            camera_modal_.getPosition().x + 50,
-            camera_modal_.getPosition().y + 50 + i*50
-        );
+        option.setPosition(start_x, start_y + i * 40);
         camera_options_.push_back(option);
     }
 }
