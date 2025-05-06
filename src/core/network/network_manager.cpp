@@ -4,8 +4,6 @@ author: Linductor
 date: 2025-05-05
 */
 #include "network_manager.h"
-#include <gst/gst.h>
-#include <gst/app/gstappsink.h>
 #include <json/json.h>
 #include <iostream>
 #include <thread>
@@ -125,7 +123,7 @@ void NetworkManager::connectToServer(const std::string& ip, int port) {
 
         // 设置连接超时
         // struct timeval tv;
-        tv.tv_sec = 3;
+        tv.tv_sec = 5;
         tv.tv_usec = 0;
         setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
@@ -162,12 +160,10 @@ void NetworkManager::connectToServer(const std::string& ip, int port) {
 
         // 发送握手
         // const std::string handshake = "CLIENT_HANDSHAKE";
-        if (send(sock, handshake.c_str(), handshake.size(), 0) <= 0) {
-            message = "Handshake failed";
-            goto cleanup;
-        }
-
-        heartbeat_thread_ = std::thread(&NetworkManager::handleHeartbeat, this);
+        // if (send(sock, handshake.c_str(), handshake.size(), 0) <= 0) {
+            // message = "Handshake failed";
+            // goto cleanup;
+        // }
 
         // 接收摄像头列表（非阻塞）
         setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
@@ -177,6 +173,8 @@ void NetworkManager::connectToServer(const std::string& ip, int port) {
             message = (n == 0) ? "Server closed" : "Receive timeout";
             goto cleanup;
         }
+
+        std::cout << "Received camera list data: " << std::string(buffer, n) << std::endl;
 
         // Json::Value cam_list;
         if (!Json::Reader().parse(buffer, buffer + n, cam_list) || !cam_list.isMember("cameras")) {
@@ -204,6 +202,7 @@ void NetworkManager::connectToServer(const std::string& ip, int port) {
         }
 
         // 启动心跳和视频线程
+        heartbeat_thread_ = std::thread(&NetworkManager::handleHeartbeat, this);
         startVideoReception();
 
         message = "Connected to " + ip;
@@ -236,21 +235,13 @@ void NetworkManager::selectCamera(int index) {
     response["camera_index"] = index;
     std::string json_str = Json::FastWriter().write(response);
     
-    // 添加3次重试机制
-    for (int retry = 0; retry < 3; ++retry) {
-        if (send(heartbeat_socket_, json_str.c_str(), json_str.size(), 0) > 0) {
-            // 等待服务端确认
-            char ack = 0;
-            if (recv(heartbeat_socket_, &ack, 1, 0) > 0 && ack == '1') {
-                connection_status_callback_(true, "摄像头选择成功");
-                return;
-            }
-        }
-        std::this_thread::sleep_for(100ms);
+    if (send(heartbeat_socket_, json_str.c_str(), json_str.size(), 0) <= 0) {
+        connection_status_callback_(false, "摄像头选择发送失败");
+        disconnect();
+    } else {
+        connection_status_callback_(true, "摄像头选择已提交");
     }
-    
-    connection_status_callback_(false, "摄像头选择失败");
-    disconnect();
+    // disconnect();
 }
 
 void NetworkManager::disconnect() {
@@ -267,14 +258,14 @@ void NetworkManager::disconnect() {
 // 心跳维护模块
 void NetworkManager::handleHeartbeat() {
     char buffer[16];
+    last_heartbeat_ = std::chrono::steady_clock::now();
     while (is_connected_) {
-        int bytes_received = recv(heartbeat_socket_, buffer, sizeof(buffer), 0);
-        
-        
         if (std::chrono::steady_clock::now() - last_heartbeat_ > 3s) {
             connection_status_callback_(false, "心跳超时");
             break;
         }
+        int bytes_received = recv(heartbeat_socket_, buffer, sizeof(buffer), 0);
+        last_heartbeat_ = std::chrono::steady_clock::now();
         if (bytes_received <= 0) {
             if (connection_status_callback_) {
                 connection_status_callback_(false, "连接已断开");
@@ -291,7 +282,7 @@ void NetworkManager::handleHeartbeat() {
             is_connected_.store(false);
             break;
         }
-        last_heartbeat_ = std::chrono::steady_clock::now();
+        // last_heartbeat_ = std::chrono::steady_clock::now();
         std::this_thread::sleep_for(HEARTBEAT_INTERVAL);
         
     }
@@ -299,12 +290,13 @@ void NetworkManager::handleHeartbeat() {
 
 // 视频接收模块
 void NetworkManager::startVideoReception() {
+    std::lock_guard<std::mutex> lock(gst_mutex_);
     video_thread_ = std::thread([this]() {
         GstElement *pipeline = gst_parse_launch(
             ("udpsrc port=" + std::to_string(VIDEO_PORT) + " ! "
             "application/x-rtp,media=video,encoding-name=H264 ! "
             "rtpjitterbuffer latency=100 ! "
-            "rtph264depay ! avdec_h264 ! videoconvert ! appsink name=sink")
+            "rtph264depay ! avdec_h264 ! videoconvert ! video/x-raw,format=RGBA ! appsink name=sink")
             .c_str(), nullptr);
 
         GstElement *sink = gst_bin_get_by_name(GST_BIN(pipeline), "sink");
@@ -320,9 +312,23 @@ void NetworkManager::startVideoReception() {
             if (sample && frame_callback_) {
                 GstBuffer *buffer = gst_sample_get_buffer(sample);
                 GstMapInfo map;
-                gst_buffer_map(buffer, &map, GST_MAP_READ);
-                frame_callback_(map.data, map.size);
-                gst_buffer_unmap(buffer, &map);
+                if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+                    // 添加视频格式解析
+                    GstCaps* caps = gst_sample_get_caps(sample);
+                    GstVideoInfo info;
+                    gst_video_info_init(&info);
+                    if (gst_video_info_from_caps(&info, caps)) {
+                        VideoFrame frame {
+                            .width = info.width,
+                            .height = info.height,
+                            .data = map.data,
+                            .size = map.size,
+                            .format = info.finfo->format
+                        };
+                        frame_callback_(frame);
+                    }
+                    gst_buffer_unmap(buffer, &map);
+                }
                 gst_sample_unref(sample);
             }
 

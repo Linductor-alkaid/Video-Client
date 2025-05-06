@@ -14,11 +14,22 @@ date: 2025-05-05
 #include <mutex>
 #include <thread>
 #include <chrono>
+#include <gst/gst.h>
+#include <gst/app/gstappsink.h>
+#include <gst/video/video.h> 
+
+struct VideoFrame {
+    int width;
+    int height;
+    const uint8_t* data;
+    size_t size;
+    GstVideoFormat format;
+};
 
 class NetworkManager {
 public:
     // 状态回调类型
-    using FrameCallback = std::function<void(const uint8_t* data, size_t size)>;
+    using FrameCallback = std::function<void(const VideoFrame&)>;
     using StatusCallback = std::function<void(bool connected, const std::string& message)>;
     using CameraListCallback = std::function<void(const std::vector<int>& cameras)>;
 
@@ -93,6 +104,7 @@ private:
     // GStreamer参数
     static constexpr int DISCOVERY_PORT = 37020;
     static constexpr int VIDEO_PORT = 5000;
+    std::mutex gst_mutex_;
 };
 
 #endif // NETWORK_MANAGER_H

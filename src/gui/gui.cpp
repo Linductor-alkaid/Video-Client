@@ -26,7 +26,6 @@ VideoClientUI::VideoClientUI()
 }
 
 VideoClientUI::~VideoClientUI() {
-    // 确保资源正确释放
     if (window.isOpen()) window.close();
 }
 
@@ -83,6 +82,8 @@ void VideoClientUI::initVideoPanel() {
     video_border.setSize({900, 600});
     video_border.setPosition(340, 80);
     video_border.setFillColor(sf::Color(30, 30, 40));
+    video_border.setOutlineThickness(2);
+    video_border.setOutlineColor(sf::Color(80, 80, 100));
 }
 
 // 状态栏初始化
@@ -104,14 +105,28 @@ void VideoClientUI::initStatusBar() {
 void VideoClientUI::handleEvents() {
     sf::Event event;
     while (window.pollEvent(event)) {
+        if (event.type == sf::Event::Closed) {
+            window.close();
+        }
+
+        // 检测视频区域点击（非模态状态下）
+        if (!is_modal_open_ && event.type == sf::Event::MouseButtonPressed) {
+            sf::Vector2f mouse_pos(event.mouseButton.x, event.mouseButton.y);
+            if (video_border.getGlobalBounds().contains(mouse_pos)) {
+                if (!camera_ids_.empty()) {
+                    showCameraSelection(camera_ids_); // 重新显示已有摄像头列表
+                }
+            }
+        }
         if (is_modal_open_) {
             // 拦截所有非模态处理的事件
-            if (event.type == sf::Event::MouseButtonPressed && show_camera_options_) {
+            if (event.type == sf::Event::MouseButtonPressed) {
                 sf::Vector2f mouse_pos(event.mouseButton.x, event.mouseButton.y);
                 for (size_t i = 0; i < camera_options_.size(); ++i) {
                     if (camera_options_[i].getGlobalBounds().contains(mouse_pos)) {
                         onCameraSelected(camera_ids_[i]);
                         show_camera_options_ = false; // 选择后隐藏
+                        camera_options_.clear();
                         break;
                     }
                 }
@@ -121,10 +136,6 @@ void VideoClientUI::handleEvents() {
         if (event.type == sf::Event::Closed) {
             window.close();
         }
-        
-        // 传递事件给服务器列表组件
-        server_list_widget_.handleEvent(event);
-
         if (!camera_options_.empty() && 
             event.type == sf::Event::MouseButtonPressed) {
             for (size_t i = 0; i < camera_options_.size(); ++i) {
@@ -139,6 +150,8 @@ void VideoClientUI::handleEvents() {
                 }
             }
         } 
+        // 传递事件给服务器列表组件
+        server_list_widget_.handleEvent(event);
     }
 }
 
@@ -156,6 +169,14 @@ void VideoClientUI::updateVideoFrame() {
             580.0f / tex_size.y
         );
         video_sprite.setScale(scale, scale);
+
+        // 计算居中位置
+        sf::FloatRect video_bounds = video_border.getGlobalBounds();
+        sf::FloatRect sprite_bounds = video_sprite.getGlobalBounds();
+        video_sprite.setPosition(
+            video_bounds.left + (video_bounds.width - sprite_bounds.width) / 2,
+            video_bounds.top + (video_bounds.height - sprite_bounds.height) / 2
+        );
     }
 }
 
@@ -188,6 +209,13 @@ void VideoClientUI::onConnectionStatus(bool connected, const std::string& msg) {
     is_connected = connected;
     status_text.setString(msg);
     
+    if (!connected) {
+        // 断开时重置摄像头相关状态
+        camera_ids_.clear();
+        camera_options_.clear();
+        is_modal_open_ = false;
+        current_server.clear();
+    }
     // 根据状态更新UI颜色
     // const auto now = std::chrono::steady_clock::now();
     if (connected) {
@@ -224,6 +252,9 @@ void VideoClientUI::onRefreshClicked() {
 }
 
 void VideoClientUI::onServerSelected(const Json::Value& server) {
+    // 创建weak_ptr以避免悬空指针
+    // auto weak_self = std::weak_ptr<VideoClientUI>(shared_from_this());
+
     current_server = server["ip"].asString();
     is_connecting = true;
     status_text.setString(sf::String::fromUtf8(std::begin("正在连接..."), std::end("正在连接...")));
@@ -249,30 +280,31 @@ void VideoClientUI::onServerSelected(const Json::Value& server) {
 void VideoClientUI::update() {
     while (window.isOpen()) {
         handleEvents();
+        updateVideoFrame();
         window.clear(sf::Color(25, 25, 35));
         
+        // 绘制服务器列表
         server_list_widget_.draw(window);
-
-        if (is_modal_open_) {
-            window.draw(camera_modal_);
-            for (auto& opt : camera_options_) window.draw(opt);
-        }
         
         // 绘制视频区域
-        
-        updateVideoFrame();
+        window.draw(video_border);
         if (video_sprite.getTexture()) {
             window.draw(video_sprite);
         }
-        if (show_camera_options_) {
-            for (auto& opt : camera_options_) window.draw(opt);
+        
+        // 绘制摄像头选择模态窗口
+        if (is_modal_open_) {
+            window.draw(camera_modal_);
+            for (auto& opt : camera_options_) {
+                window.draw(opt);
+            }
         }
-        window.draw(video_border);
-
-        // 状态栏
+        
+        // 绘制状态栏
         window.draw(status_bar);
         updateStatusText();
         window.draw(status_text);
+        
         window.display();
 
         // 检查窗口状态
@@ -289,22 +321,27 @@ void VideoClientUI::showCameraSelection(const std::vector<int>& cameras) {
     if (cameras.empty()) return;
     camera_ids_ = cameras;
 
-    is_modal_open_ = true; // 进入模态状态
+    // 初始化模态背景
+    camera_modal_.setSize(video_border.getSize());
+    camera_modal_.setPosition(video_border.getPosition());
+    camera_modal_.setFillColor(sf::Color(50, 50, 70, 220)); // 半透明深灰背景
+
     camera_options_.clear();
-    // 创建模态选择框
     // 设置位置到视频区域顶部
     float start_x = video_border.getPosition().x + 20;
     float start_y = video_border.getPosition().y + 20;
     
     // 创建选项
-    camera_options_.clear();
     for (size_t i = 0; i < cameras.size(); ++i) {
         sf::Text option;
         option.setFont(font);
         option.setString(sf::String::fromUtf8(std::begin("摄像头 " + std::to_string(cameras[i])), std::end("摄像头 " + std::to_string(cameras[i]))));
+        option.setCharacterSize(20);
+        option.setFillColor(sf::Color::White);
         option.setPosition(start_x, start_y + i * 40);
         camera_options_.push_back(option);
     }
+    is_modal_open_ = true; // 进入模态状态
 }
 
 void VideoClientUI::onCameraSelected(int index) {
@@ -317,4 +354,6 @@ void VideoClientUI::onCameraSelected(int index) {
         std::cerr << "摄像头选择错误: " << e.what() << std::endl;
         status_text.setString(sf::String::fromUtf8(std::begin("选择摄像头失败"), std::end("选择摄像头失败")));
     }
+    is_modal_open_ = false;
+    camera_options_.clear();
 }
