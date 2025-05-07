@@ -22,19 +22,21 @@ std::vector<Json::Value> ServerListCache::get() {
 
 ServerListWidget::ServerListWidget(NetworkManager& net_mgr, ServerListCache& cache)
     : net_manager_(net_mgr), server_cache_(cache), displayed_servers_() {
+    std::string title_name = "可用服务器";
+    std::string refresh_name = "刷新列表";
     
     // 初始化UI组件
     panel_.setSize({300, 600});
     panel_.setFillColor(sf::Color(50, 50, 60));
     
     title_.setFont(*font_);
-    title_.setString(sf::String::fromUtf8(std::begin("可用服务器"), std::end("可用服务器")));
+    title_.setString(sf::String::fromUtf8(std::begin(title_name), std::end(title_name)));
     title_.setCharacterSize(24);
     
     refresh_btn_.setSize({120, 40});
     refresh_btn_.setFillColor(sf::Color(80, 80, 90));
     refresh_text_.setFont(*font_);
-    refresh_text_.setString(sf::String::fromUtf8(std::begin("刷新列表"), std::end("刷新列表")));
+    refresh_text_.setString(sf::String::fromUtf8(std::begin(refresh_name), std::end(refresh_name)));
     refresh_text_.setCharacterSize(24);
 }
 

@@ -268,21 +268,18 @@ void VideoClientUI::onConnectionStatus(bool connected, const std::string& msg) {
 void VideoClientUI::pushVideoFrame(int width, int height, std::vector<uint8_t> pixels) {
     std::lock_guard<std::mutex> lock(frame_mutex);
     if (raw_frames.size() < 10) {
-        // 计算每行需要的字节数（4 字节对齐）
-        const size_t stride = (width * 3 + 3) & ~3; // RGB24 格式下的行对齐
+        // 修改为处理RGBA格式（每个像素4字节）
+        const size_t bytes_per_pixel = 4; // RGBA格式
+        const size_t stride = width * bytes_per_pixel; // 每行字节数（无额外对齐）
         const size_t expected_size = stride * height;
 
-        // 如果数据未对齐，进行填充
-        if (pixels.size() != expected_size) {
-            std::vector<uint8_t> aligned_pixels(expected_size, 0);
-            for (size_t row = 0; row < height; ++row) {
-                const uint8_t* src = pixels.data() + row * width * 3;
-                uint8_t* dst = aligned_pixels.data() + row * stride;
-                std::copy(src, src + width * 3, dst);
-            }
-            raw_frames.emplace_back(width, height, std::move(aligned_pixels));
-        } else {
+        // 移除对齐填充逻辑，直接使用数据
+        if (pixels.size() == expected_size) {
             raw_frames.emplace_back(width, height, std::move(pixels));
+        } else {
+            // 数据大小异常，记录错误避免越界
+            std::cerr << "视频帧大小不符预期: 期望 " << expected_size 
+                      << " 实际 " << pixels.size() << std::endl;
         }
     }
 }
@@ -377,9 +374,10 @@ void VideoClientUI::showCameraSelection(const std::vector<int>& cameras) {
     
     // 创建选项
     for (size_t i = 0; i < cameras.size(); ++i) {
+        std::string camera_name = "摄像头 ";
         sf::Text option;
         option.setFont(font);
-        option.setString(sf::String::fromUtf8(std::begin("摄像头"), std::end("摄像头")) + std::to_string(cameras[i]));
+        option.setString(sf::String::fromUtf8(std::begin(camera_name), std::end(camera_name)) + std::to_string(cameras[i]));
         option.setCharacterSize(20);
         option.setFillColor(sf::Color::White);
         option.setPosition(start_x, start_y + i * 40);
