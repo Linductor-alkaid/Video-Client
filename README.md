@@ -4,7 +4,7 @@
 ![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Unix--like-green)
 [![CMake](https://img.shields.io/badge/Build-CMake-brightgreen)](https://cmake.org)
 
-跨平台视频客户端，基于SFML和GStreamer实现服务发现、视频流接收和GUI显示。
+局域网视频客户端，基于SFML和GStreamer实现服务发现、视频流接收和GUI显示。
 
 ---
 
